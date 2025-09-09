@@ -1,0 +1,17 @@
+**/.quarto/*
+.Rproj.user
+data/**
+**/*_cache/*
+*_files/*
+**/*_freeze/*
+**/*tsv*
+**/*csv*
+**/*xlsx*
+**/*zip
+**/*pdf
+.DS_Store
+.Rhistory
+/.quarto/*
+/.quarto/
+data/mp01/nyc_payroll_export.csv
+
