@@ -1,5 +1,5 @@
 ---
-title: "Hi, welcome to Zhuohan’s homepage!"
+title: "Hi,Welcome to Zhuohan’s Homepage!"
 
 ---
 
