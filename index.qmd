@@ -1,0 +1,63 @@
+---
+title: "Hi, welcome to Zhuohan’s homepage!"
+format: html
+---
+
+## ABOUT ME
+
+
+### Personal Profile
+
+Hello, my name is [Zhuohan Sun][1], but you can also call me Linda.  
+I come from Shenyang, China.  
+I am a student from the STA9750 class in the Fall 2025 semester.  
+I’m a graduate student in the Marketing Analytics program at [Baruch College][2].  
+I earned my bachelor’s degree in Business Administration with a minor in Marketing from Iona College.
+
+In my free time, I love traveling and cooking. I also have a lovely silver-shaded cat named Martini. 
+
+### My Photo
+
+![](images/IMG_0446.JPG){width="80%" style="border-radius:20px; box-shadow:0 4px 8px rgba(0,0,0,0.2);"}
+
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+if (!require("leaflet")) {
+  options(repos = c(CRAN = "https://cloud.r-project.org"))
+  install.packages("leaflet")
+  stopifnot(require("leaflet"))
+}
+baruch_longitude <- -73.98333
+baruch_latitude  <- 40.75028
+leaflet() |>
+  addTiles() |>
+  setView(baruch_longitude, baruch_latitude, zoom = 17) |>
+  addPopups(baruch_longitude, baruch_latitude,
+            "I am a Master's student at <b>Baruch College</b>!")
+```
+
+
+```{mermaid}
+flowchart LR
+A[Education]-->B(Bachelor's of Business Management)
+A-->C(Bachelor's of Business Marketing )
+B-->D[Master's of Science in Business Analytic]
+C-->D[Master's of Science in Business Analytic]
+```
+
+
+
+
+
+```{r}
+#| include: false
+1+1
+```
+--------------
+Last Updated: `r format(Sys.time(), "%A %m %d, %Y at %H:%M%p")`
+
+[1]: https://www.linkedin.com/messaging/thread/2-MTRkMTk2Y2QtNjE1Yy00MWU0LWI0ZTItZTYxM2NiMDZmZTFhXzEwMA==/
+[2]: https://zicklin.baruch.cuny.edu/
