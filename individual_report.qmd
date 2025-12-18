@@ -1,0 +1,468 @@
+---
+title: "Geographic Inequities in Walkable Healthcare Access Across New York City"
+author: "zhuohan"
+format: 
+  html: 
+    theme: journal
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-summary: "Show code"
+    embed-resources: true
+---
+
+
+# Introduction
+
+Access to healthcare services is a critical dimension of urban equity, with important implications for population health and quality of life. In large metropolitan areas such as New York City, healthcare facilities are unevenly distributed across space, meaning that residents’ ability to reach care often depends on where they live. Physical proximity to healthcare facilities, particularly primary care providers, plays a key role in shaping whether individuals can realistically obtain timely and preventive care.
+
+While healthcare access is often discussed using aggregate indicators, such as the total number of hospitals or providers within a city, these measures can obscure meaningful neighborhood-level differences in spatial accessibility. Proximity captures an essential aspect of access by reflecting the everyday geographic constraints residents face, especially for those who rely on walking or local transportation. As a result, neighborhoods that are farther from healthcare facilities may experience reduced access even when citywide supply appears adequate.
+
+## SQ: How does proximity to healthcare facilities correlate with income levels and racial/ethnic composition?
+
+This study examines how proximity to healthcare facilities varies across neighborhoods in New York City and whether these spatial patterns are systematically associated with socioeconomic and demographic characteristics. Specifically, the analysis investigates the relationship between proximity to healthcare facilities and neighborhood income levels, as well as racial and ethnic composition neighborhoods at the census tract level. By integrating spatial measures of proximity of healthcare with census-based socioeconomic data, the study aims to identify whether lower-income or more racially and ethnically diverse experience reduced geographic access to care.
+
+Understanding these relationships has important policy implications. If proximity to healthcare facilities is systematically correlated with income or racial and ethnic composition, such patterns may reflect underlying structural inequities in urban development and resource allocation. Measuring and evaluating these spatial disparities is therefore a necessary step toward promoting more equitable healthcare access.
+
+# Data Acquisition
+
+To examine how proximity to healthcare facilities correlates with neighborhood income levels and racial/ethnic composition in New York City, three primary datasets were collected, cleaned, and geospatially harmonized. Together, these datasets provide the spatial foundation for measuring proximity and the socioeconomic context needed to assess neighborhood-level disparities.
+
+```{r setup, include=FALSE}
+library(tidyverse)  
+library(sf)
+library(leaflet)
+library(httr2)
+library(jsonlite)
+library(lubridate)
+library(DT)
+library(scales)
+library(infer)
+library(rvest)
+library(tigris)
+library(purrr)
+library(tidycensus)
+# API key
+# census_api_key("83f0351e3dd5e5836f20fb028d6e87bd12bd8dea", install = TRUE)
+```
+
+## NYC Facilities Database
+
+The New York City Facilities Database was used to identify health-related facilities, including clinics, hospitals, and medical centers, and to obtain accurate geographic coordinates for proximity analysis. This dataset serves as the foundation for measuring spatial access to healthcare, as each facility represents a potential point of care for nearby residents.
+
+Facility records were retrieved from NYC Open Data and filtered to retain only entries associated with healthcare services based on facility domain, type, group, and subgroup classifications. Observations with missing geographic coordinates were excluded to ensure spatial accuracy. The remaining facilities were converted into a spatial dataset and transformed into a common coordinate reference system for subsequent proximity calculations.
+
+```{r}
+# Create directory for mp05 data
+dir.create("data/mp05", recursive = TRUE, showWarnings = FALSE)
+
+# API endpoint
+facdb_url <- "https://data.cityofnewyork.us/resource/ji82-xba5.json?$limit=50000"
+
+# Download JSON and save raw file
+raw_file <- "data/mp05/facdb_raw.json"
+writeLines(httr2::req_perform(httr2::request(facdb_url)) |> 
+             httr2::resp_body_string(),
+           raw_file)
+
+# Read JSON into R
+facdb_raw <- jsonlite::fromJSON(raw_file) |> 
+  tibble::as_tibble()
+
+# Data cleaning: filter for health-related facilities
+facdb_health <- facdb_raw |>
+  janitor::clean_names() |>
+  filter(
+    str_detect(facdomain, regex("health", ignore_case = TRUE)) |
+    str_detect(factype,   regex("clinic|hospital|medical|nursing", ignore_case = TRUE)) |
+    str_detect(facgroup,  regex("health", ignore_case = TRUE)) |
+    str_detect(facsubgrp, regex("health", ignore_case = TRUE))
+  ) |>
+  select(facname, boro, factype, facsubgrp, xcoord, ycoord) |>
+  drop_na(xcoord, ycoord) |>
+  st_as_sf(coords = c("xcoord", "ycoord"), crs = 2263) |>
+  st_transform(4326)
+
+# Save cleaned sf file to mp05
+st_write(facdb_health, "data/mp05/facdb_health.geojson", delete_dsn = TRUE)
+
+nrow(facdb_health)
+head(facdb_health)
+```
+
+## Mapbox Isochrones API
+
+The Mapbox Isochrones API was used to operationalize healthcare proximity as a realistic, walkable measure of spatial accessibility. For each healthcare facility, ten-minute walking service areas (isochrones) were generated to approximate the neighborhood area that could reach that facility on foot under typical walking conditions. These service areas were later overlaid with census tract boundaries to quantify tract-level proximity to care, enabling direct comparison of proximity patterns across neighborhoods with different income levels and racial/ethnic compositions.
+
+```{r}
+# Get MAPBOX key
+MAPBOX_TOKEN <- "pk.eyJ1Ijoiemh1b2hhbnN1biIsImEiOiJjbWowZ3pnemgwOHM2M2dxM2V2N3ltcG45In0.6vTE5p1FIE2CRtZkGXCkvQ"
+
+# Function: request 10-minute walking isochrone for one facility 
+get_isochrone_10min <- function(lon, lat, facility_id) {
+  
+  base_url <- "https://api.mapbox.com/isochrone/v1/mapbox/walking"
+  
+  # Build request URL
+  iso_url <- sprintf(
+    "%s/%.6f,%.6f?contours_minutes=10&polygons=true&access_token=%s",
+    base_url, lon, lat, MAPBOX_TOKEN
+  )
+  
+  # Read GeoJSON from Mapbox
+  iso_sf <- tryCatch(
+    {
+      sf::read_sf(iso_url) |>
+        dplyr::mutate(facility_id = facility_id)
+    },
+    error = function(e) {
+      message("Isochrone failed for facility ", facility_id, ": ", e$message)
+      NULL
+    }
+  )
+  
+  return(iso_sf)
+}
+```
+
+## U.S. Census Bureau
+
+### American Community Survey(ACS)
+
+ACS five-year estimates from the U.S. Census Bureau were used to provide census tract–level socioeconomic and demographic characteristics for New York City. These data supply the neighborhood attributes used to assess whether healthcare proximity is systematically associated with income and racial/ethnic composition. In particular, the analysis incorporates median household income and a tract-level measure of racial/ethnic composition (operationalized as the share of non-White residents), along with additional contextual indicators such as poverty rates and total population. All ACS variables were downloaded with tract geometries and transformed into a consistent coordinate reference system to support spatial joins with the proximity measures derived from the isochrone service areas.
+
+```{r}
+# Create project data directory (silently if it already exists)
+dir.create("data/mp05", recursive = TRUE, showWarnings = FALSE)
+
+# Enable caching for TIGRIS shapefiles to improve performance
+options(tigris_use_cache = TRUE)
+
+# Specify ACS release year (5-year ACS: 2019–2023)
+acs_year <- 2023
+
+# Local cache file path 
+acs_cache <- sprintf("data/mp05/nyc_acs_%s.gpkg", acs_year)
+
+# ACS variables used in the analysis
+acs_vars <- c(
+  population     = "B01003_001",  
+  median_income  = "B19013_001",  
+  white          = "B03002_003",  
+  total_race     = "B03002_001",  
+  below_poverty  = "B17001_002",  
+  total_poverty  = "B17001_001"   
+)
+
+# Check whether a cached ACS file already exists
+if (file.exists(acs_cache)) {
+
+  # If cached data exist, load them directly to ensure reproducibility
+  message("Using cached ACS: ", acs_cache)
+  nyc_acs <- sf::read_sf(acs_cache, layer = "nyc_acs")
+
+} else {
+
+  # Otherwise, download ACS data from the Census API
+  message("Downloading ACS (will cache locally)...")
+
+  nyc_acs_raw <- tidycensus::get_acs(
+    geography = "tract",
+    variables = acs_vars,
+    year = acs_year,
+    state = "NY",
+    county = c("Bronx", "Kings", "New York", "Queens", "Richmond"),
+    geometry = TRUE
+  )
+
+  # Clean variable names, reshape to wide format, and compute
+  # derived socioeconomic indicators
+  nyc_acs <- nyc_acs_raw |>
+    janitor::clean_names() |>
+    dplyr::select(geoid, variable, estimate, geometry) |>
+    tidyr::pivot_wider(
+      names_from = variable,
+      values_from = estimate
+    ) |>
+    dplyr::mutate(
+      pct_minority = 1 - (white / total_race),
+      pct_poverty  = below_poverty / total_poverty
+    ) |>
+    sf::st_transform(4326)  # Transform to WGS84 for mapping and joins
+
+  # Save the processed ACS dataset to a local cache file
+  sf::write_sf(
+    nyc_acs,
+    acs_cache,
+    layer = "nyc_acs",
+    delete_layer = TRUE,
+    quiet = TRUE
+  )
+
+  message("Saved ACS cache: ", acs_cache)
+}
+
+# Inspect the final ACS dataset structure
+glimpse(nyc_acs)
+```
+
+
+### Census Tract Boundaries
+
+Census tract boundaries were used as the primary spatial unit of analysis to link healthcare proximity measures with neighborhood socioeconomic and demographic characteristics. Census tracts provide a standardized and policy-relevant geographic scale that captures meaningful within-city variation while remaining small enough to reflect local neighborhood conditions.
+
+Tract-level boundary shapefiles were obtained for all five New York City boroughs and transformed into a common coordinate reference system. These boundaries enabled spatial joins between the walkable proximity measures derived from healthcare facility isochrones and tract-level ACS variables, ensuring that proximity, income, and racial/ethnic composition were measured consistently across neighborhoods.
+
+```{r}
+
+# Create project data directory if it does not already exist
+dir.create("data/mp05", recursive = TRUE, showWarnings = FALSE)
+
+# Enable local caching for TIGRIS shapefiles
+options(tigris_use_cache = TRUE)
+
+# Specify census tract boundary vintage
+tract_year  <- 2024
+
+# Local cache file path 
+tract_cache <- sprintf("data/mp05/nyc_tracts_%s.gpkg", tract_year)
+
+# Check whether cached tract boundaries already exist
+if (file.exists(tract_cache)) {
+
+  # Load cached tract geometries to ensure reproducibility
+  nyc_tracts_2024 <- sf::read_sf(tract_cache, layer = "nyc_tracts")
+
+} else {
+
+  # Download census tract boundaries for NYC counties
+  nyc_tracts_2024 <- tigris::tracts(
+    state = "NY",
+    county = c("Bronx", "Kings", "New York", "Queens", "Richmond"),
+    year = tract_year,
+    cb = FALSE
+  ) |>
+    sf::st_transform(4326)  
+  
+  # Cache tract boundaries locally for future use
+  sf::write_sf(
+    nyc_tracts_2024,
+    tract_cache,
+    layer = "nyc_tracts",
+    delete_layer = TRUE,
+    quiet = TRUE
+  )
+}
+
+# Inspect the census tract boundary dataset
+nyc_tracts_2024
+```
+
+# Data Integration and Initial Exploration
+
+We integrated healthcare facility locations, walkability metrics, and census tract–level socioeconomic data to construct a spatially explicit indicator of healthcare accessibility in New York City. This analysis conceptualizes geographic proximity as a constraint on access to healthcare services, a constraint that may vary systematically across communities with different income levels and racial/ethnic compositions.
+
+Healthcare accessibility is measured using a walkability-based proximity score, defined as the proportion of land area within each census tract that lies within a ten-minute walking distance of a healthcare facility. To construct this indicator, we randomly sampled 150 healthcare facilities from a cleaned database of New York City healthcare institutions and used a geocoding-based routing API to generate ten-minute walking isochrones around each facility. These isochrones approximate the areas that residents can reasonably reach on foot under typical walking conditions.
+
+The isochrone service areas were spatially overlaid with census tract boundaries to calculate the total area within each tract covered by at least one isochrone. The resulting proximity scores range from 0 to 1, with higher values indicating greater walkable access to healthcare facilities. These tract-level accessibility indicators were then merged with socioeconomic and demographic variables from the American Community Survey to support subsequent correlation and regression analyses examining how healthcare accessibility varies across neighborhoods by income and racial/ethnic composition.
+
+To balance spatial coverage with external API request limitations, healthcare facilities were sampled rather than exhaustively included. Accordingly, the proximity scores should be interpreted as approximations of walkable healthcare coverage rather than a complete enumeration of all healthcare facilities citywide.
+
+```{r}
+# Extract longitude and latitude coordinates from the healthcare facilities dataset
+coords_all <- sf::st_coordinates(facdb_health)
+
+# Remove facilities with invalid or out-of-city coordinates (retain NYC only)
+facdb_health_ok <- facdb_health |>
+  dplyr::mutate(
+    lon = coords_all[, 1],
+    lat = coords_all[, 2]
+  ) |>
+  dplyr::filter(
+    dplyr::between(lon, -74.30, -73.65),
+    dplyr::between(lat,  40.45, 40.95)
+  ) |>
+  dplyr::select(-lon, -lat)
+
+# Randomly sample 150 healthcare facilities for isochrone analysis
+set.seed(123)
+facdb_subset <- facdb_health_ok |>
+  dplyr::slice_sample(n = 150) |>
+  dplyr::mutate(facility_id = dplyr::row_number()) |>
+  sf::st_transform(4326)
+
+# Load pre-generated 10-minute walking isochrones and project to WGS84
+isochrones_all <- sf::st_read("data/mp05/isochrones_150.geojson", quiet = TRUE) |>
+  sf::st_transform(4326)
+
+# Clean and simplify isochrone geometries for interactive mapping
+iso_show <- isochrones_all |>
+  sf::st_make_valid() |>
+  sf::st_simplify(dTolerance = 0.0001, preserveTopology = TRUE)
+
+# Visualize walkable access to healthcare facilities using an interactive map
+leaflet() |>
+  addProviderTiles(providers$CartoDB.Positron) |>
+  addPolygons(
+    data = iso_show,
+    weight = 1,
+    opacity = 0.6,
+    fillOpacity = 0.25,
+    popup = ~"10-minute walk isochrone"
+  ) |>
+  addCircleMarkers(
+    data = facdb_subset,
+    radius = 3,
+    stroke = FALSE,
+    fillOpacity = 0.9,
+    popup = ~facname
+  )
+```
+
+This map shows healthcare facilities within walking distance in New York City.
+
+This interactive map displays ten-minute walking isochrones (shaded areas) around a randomly sampled set of healthcare facilities, along with the locations of those facilities (points). The visualization provides an intuitive view of how the spatial distribution of facilities translates into uneven patterns of walkable coverage across the city.
+
+The map is intended as an exploratory visualization that motivates the construction of a tract-level walkability metric used in subsequent analyses, rather than as a direct measure of neighborhood-level accessibility.
+
+```{r}
+# Ensure inputs are sf objects
+stopifnot(inherits(isochrones_all, "sf"))
+stopifnot(inherits(nyc_acs, "sf"))
+
+# Project to a common CRS suitable for area calculations (EPSG:2263)
+isochrones_2263 <- isochrones_all |>
+  sf::st_make_valid() |>
+  sf::st_transform(2263)
+
+nyc_acs_2263 <- nyc_acs |>
+  sf::st_make_valid() |>
+  sf::st_transform(2263)
+
+# Union all isochrones to avoid double counting overlapping areas
+iso_union <- sf::st_union(sf::st_geometry(isochrones_2263))
+
+# Intersect tracts with isochrone coverage
+nyc_intersections <- suppressWarnings(
+  sf::st_intersection(nyc_acs_2263, iso_union)
+)
+
+# Calculate total covered area per tract
+if (nrow(nyc_intersections) == 0) {
+  intersections_sum <- tibble::tibble(geoid = character(),
+                                      total_intersect_area = numeric())
+} else {
+  nyc_intersections$intersect_area <- as.numeric(
+    sf::st_area(sf::st_geometry(nyc_intersections))
+  )
+
+  intersections_sum <- nyc_intersections |>
+    sf::st_drop_geometry() |>
+    dplyr::group_by(geoid) |>
+    dplyr::summarise(
+      total_intersect_area = sum(intersect_area, na.rm = TRUE),
+      .groups = "drop"
+    )
+}
+
+# Compute tract area and proximity score
+nyc_acs_2263$tract_area <- as.numeric(
+  sf::st_area(sf::st_geometry(nyc_acs_2263))
+)
+
+nyc_access <- nyc_acs_2263 |>
+  dplyr::left_join(intersections_sum, by = "geoid") |>
+  dplyr::mutate(
+    total_intersect_area = dplyr::coalesce(total_intersect_area, 0),
+    proximity_score = pmin(total_intersect_area / tract_area, 1),
+    proximity_score = dplyr::coalesce(proximity_score, 0)
+  )
+```
+
+```{r}
+# Create an NYC Healthcare Accessibility Map
+ggplot(nyc_access) +
+  geom_sf(aes(fill = proximity_score), color = NA) +
+  scale_fill_viridis_c(option = "plasma", direction = -1) +
+  labs(
+    title = "10-Minute Walkable Access to Primary Care Facilities",
+    fill = "Proximity Score"
+  ) +
+  theme_minimal()
+```
+
+This map presents the tract-level healthcare accessibility measure, defined as the proportion of land area within each census tract that falls within a ten-minute walking distance of a healthcare facility. Higher values indicate greater walkable access to healthcare services.
+
+The results reveal substantial spatial heterogeneity in healthcare accessibility across New York City. Census tracts with higher accessibility scores are concentrated in parts of Manhattan and selected areas of the Bronx and Brooklyn, while many tracts in Queens and Staten Island exhibit lower accessibility. These patterns highlight neighborhood-level disparities in walkable healthcare access that are obscured by borough-wide or citywide averages.
+
+# Proximity Measures and Statistical Analysis
+
+Above, the maps provide a spatial overview of walkable healthcare accessibility across New York City. To formally evaluate whether these geographic patterns are systematically associated with neighborhood socioeconomic characteristics, we conducted pairwise correlation analysis and estimated linear regression models at the census tract level.
+
+We focus on two core predictors aligned with the study question: median household income and racial/ethnic composition, operationalized as the share of minority residents (pct_minority). The regression model treats the tract-level proximity score (the proportion of tract land area within a ten-minute walk of a healthcare facility) as the outcome variable. Results are interpreted as descriptive associations, not causal effects.
+
+```{r}
+# Drop geometry and keep only analysis variables
+access_df <- nyc_access |>
+  sf::st_drop_geometry() |>
+  dplyr::select(proximity_score, median_income, pct_minority, pct_poverty)
+
+# Inspect pairwise correlations among key variables
+cor(access_df, use = "complete.obs")
+
+# Linear regression:
+model <- lm(
+  proximity_score ~ median_income + pct_minority,
+  data = access_df
+)
+
+# Regression results
+summary(model)
+
+```
+
+The correlation matrix shows a negative correlation between median household income and healthcare accessibility, suggesting that census tracts with lower incomes tend to have higher walkability scores. Consistent with this pattern, regression results indicate a statistically significant negative correlation between median household income and accessibility scores after controlling for racial/ethnic composition.
+
+In contrast, the proportion of minorities in the regression model is not statistically significant after accounting for income. This does not mean that racial/ethnic disparities in healthcare accessibility do not exist; rather, it suggests that in this measure based on walkability, racial/ethnic composition does not explain additional variation beyond income. Many communities with a higher proportion of minorities are also low-income communities, and these co-varying community characteristics may influence the observed spatial patterns.
+
+The model explains only a small portion of the overall variation in accessibility (R² ≈ 0.02), which is expected, as healthcare accessibility is multifaceted and also depends on factors not included here, such as healthcare facility capacity, insurance acceptance, ease of scheduling appointments, and transportation infrastructure.
+
+```{r}
+# Income vs healthcare accessibility
+ggplot(access_df, aes(x = median_income, y = proximity_score)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = "lm") +
+  labs(
+    title = "Income vs Healthcare Proximity",
+    x = "Median household income (USD)",
+    y = "Proximity score"
+  ) +
+  theme_minimal()
+
+# Minority share vs healthcare accessibility
+ggplot(access_df, aes(x = pct_minority, y = proximity_score)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = "lm") +
+  labs(
+    title = "Minority Share vs Healthcare Proximity",
+    x = "Share of minority population",
+    y = "Proximity score"
+  ) +
+  theme_minimal()
+```
+
+The scatter plots further illustrate the bivariate relationships between healthcare accessibility and key community characteristics. The relationship between median household income and healthcare accessibility shows a downward trend, consistent with the regression analysis results, although significant variations still exist between different census tracts. This variation suggests that income alone does not fully determine geographically based healthcare accessibility.
+
+In contrast, the scatter plot between healthcare accessibility and the proportion of non-white residents does not show a clear linear pattern. The fitted trend line is relatively flat, further confirming the regression analysis results that racial and ethnic composition is not a strong independent predictor of walkability-based healthcare accessibility at the census tract level.
+
+In summary, these visualizations complement the regression analysis, demonstrating the direction and significant variability of the observed relationships and highlighting the descriptive nature of the findings.
+
+# Discussion
+
+The findings provide evidence that walkable proximity to healthcare facilities in New York City is unevenly distributed and systematically associated with neighborhood economic conditions. The negative relationship between income and proximity suggests that lower-income neighborhoods tend to have greater walkable access to healthcare facilities, while higher-income areas may rely more heavily on mobility, car access, or less densely distributed services. This pattern is consistent with the spatial concentration of clinics and safety-net providers in denser, lower-income areas.
+
+Although the model explains a relatively small proportion of the overall variability in healthcare accessibility (R² ≈ 0.02), this does not diminish the relevance of the findings. Healthcare accessibility is a multidimensional phenomenon shaped by factors such as facility capacity, transportation infrastructure, insurance acceptance, and appointment availability, which are not captured in this analysis.
+
+Because the proximity score is a land-area-based walkability measure, it captures only one dimension of access and may differ from effective access experienced by residents. Additionally, the use of a sampled subset of healthcare facilities introduces measurement noise that likely attenuates overall model fit, even though the direction and statistical significance of key associations remain informative.
+
+Overall, the analysis highlights the value of spatially explicit measures in revealing how economic conditions intersect with geographic access to healthcare. By focusing on walkable proximity at the census tract level, this study provides a nuanced understanding of how neighborhood characteristics shape one important component of healthcare accessibility in New York City.
